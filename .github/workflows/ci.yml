@@ -12,7 +12,6 @@ jobs:
   repository-check:
     name: repository-check
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -21,3 +20,19 @@ jobs:
         run: |
           test -s README.md
           test -f .github/workflows/ci.yml
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Run application tests
+        shell: bash
+        run: |
+          if [ -f package.json ]; then
+            test -f tests/task-manager.test.js
+            node --test tests/*.test.js
+          else
+            echo "Bootstrap: application not merged yet; application tests skipped."
+          fi
