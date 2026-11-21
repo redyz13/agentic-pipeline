@@ -180,7 +180,7 @@ jobs:
   publish:
     name: specialist-review
     needs: analyze
-    if: always() && github.event.pull_request.draft == false
+    if: ${{ !cancelled() && github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
