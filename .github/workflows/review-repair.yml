@@ -1,0 +1,157 @@
+name: Specialist review repair
+
+on:
+  pull_request_target:
+    types: [labeled]
+
+concurrency:
+  group: specialist-repair-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  dispatch:
+    name: Validate specialist findings and request correction
+    if: >-
+      github.event.label.name == 'stage:fix' &&
+      github.event.sender.login == github.repository_owner &&
+      github.event.pull_request.state == 'open' &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Verify approved issue, current review, and repair budget
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          repo = os.environ['REPOSITORY']
+          pr_number = int(os.environ['PR_NUMBER'])
+          expected_sha = os.environ['EXPECTED_HEAD_SHA']
+
+          def api(endpoint):
+              return json.loads(subprocess.check_output(
+                  ['gh', 'api', endpoint], text=True))
+
+          pr = api(f'repos/{repo}/pulls/{pr_number}')
+          if pr['state'] != 'open' or pr['draft'] or pr['base']['ref'] != 'main':
+              sys.exit('Repair requires an open, non-Draft PR targeting main')
+          if pr['head']['repo']['full_name'] != repo:
+              sys.exit('Fork pull requests are not eligible for automatic repair')
+          if pr['head']['sha'] != expected_sha:
+              sys.exit('The PR changed since the stage:fix event')
+          pr_labels = {label['name'] for label in pr.get('labels', [])}
+          if 'stage:fix' not in pr_labels:
+              sys.exit('stage:fix was removed before dispatch')
+
+          issue_refs = set(map(int, re.findall(
+              r'(?im)\b(?:closes|fixes|resolves)\s+#(\d+)\b', pr.get('body') or '')))
+          if len(issue_refs) != 1:
+              sys.exit('PR must reference exactly one approved Issue')
+          issue_no = issue_refs.pop()
+          issue = api(f'repos/{repo}/issues/{issue_no}')
+          issue_labels = {label['name'] for label in issue.get('labels', [])}
+          if 'stage:implementing' not in issue_labels or 'stage:blocked' in issue_labels:
+              sys.exit('Linked Issue is not authorized for implementation')
+
+          issue_comments = api(f'repos/{repo}/issues/{issue_no}/comments?per_page=100')
+          if len(issue_comments) == 100:
+              sys.exit('Issue has too many comments: human verification required')
+          plans = [comment for comment in issue_comments
+                   if '<!-- automated-planning-v1 -->' in (comment.get('body') or '')
+                   and (comment.get('user') or {}).get('login') == 'github-actions[bot]']
+          if not plans:
+              sys.exit('No trusted approved planning report')
+          latest_plan = max(plans, key=lambda c: c['id'])['body']
+          if not re.search(r'(?m)^\s*\*\*READY_FOR_APPROVAL\*\*\s*$', latest_plan):
+              sys.exit('Latest planning report is not READY_FOR_APPROVAL')
+
+          comments = api(f'repos/{repo}/issues/{pr_number}/comments?per_page=100')
+          if len(comments) == 100:
+              sys.exit('PR has too many comments: human verification required')
+          reports = [comment for comment in comments
+                     if '<!-- specialist-review-v1 -->' in (comment.get('body') or '')
+                     and (comment.get('user') or {}).get('login') == 'github-actions[bot]']
+          if not reports:
+              sys.exit('No trusted specialist review found')
+          latest = max(reports, key=lambda c: c['id'])
+          body = latest.get('body') or ''
+          if not re.search(r'(?m)^## Specialist AI review — CHANGES_REQUESTED\s*$', body):
+              sys.exit('Latest specialist review did not request changes')
+          match = re.search(r'(?m)^\*\*Reviewed revision:\*\* `([0-9a-f]{40})`\s*$', body)
+          if not match or match.group(1) != expected_sha:
+              sys.exit('Specialist review is stale; rerun review for the current PR head')
+
+          attempts = [comment for comment in comments
+                      if '<!-- specialist-repair-v1' in (comment.get('body') or '')
+                      and (comment.get('user') or {}).get('login') == repo.split('/')[0]]
+          if len(attempts) >= 2:
+              sys.exit('Specialist repair limit reached (2): human decision required')
+          if any(f'<!-- specialist-repair-v1 sha={expected_sha} -->' in (c.get('body') or '')
+                 for c in attempts):
+              sys.exit('A repair has already been requested for this PR revision')
+
+          message = (
+              '@copilot\n\n'
+              f'<!-- specialist-repair-v1 sha={expected_sha} -->\n'
+              'Continue working on THIS pull request. The independent specialist reviewer '
+              f'requested changes to revision `{expected_sha}` in the latest '
+              'bot-published `Specialist AI review — CHANGES_REQUESTED` report.\n\n'
+              '1. Read that report, the approved Issue and plan, and '
+              '`docs/architecture/lab-architecture.md`. Verify each finding against the code.\n'
+              '2. Correct only confirmed defects in application source. Do not add features.\n'
+              '3. If a finding is incorrect or conflicts with approved requirements, '
+              'explain the conflict in a PR comment and request a human decision.\n'
+              '4. Do not modify `.github/`, `AGENTS.md`, `docs/architecture/`, '
+              'or independent test files. Do not weaken tests or add dependencies.\n'
+              '5. Run `npm test` and report the actual results. Push any corrections '
+              'to this PR branch. Do NOT merge the PR.\n\n'
+              f'Specialist repair attempt: {len(attempts) + 1} of 2.\n'
+          )
+          Path('review-repair-comment.md').write_text(message, encoding='utf-8')
+          print(f'Validated review for PR #{pr_number}, HEAD {expected_sha}; '
+                f'repair {len(attempts) + 1}/2')
+          PY
+
+      - name: Request correction from Copilot on the existing PR
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_ASSIGN_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test -n "${GH_TOKEN:-}" || {
+            echo 'Missing COPILOT_ASSIGN_TOKEN' >&2
+            exit 1
+          }
+          CURRENT_SHA=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')
+          test "$CURRENT_SHA" = "$EXPECTED_HEAD_SHA" || {
+            echo 'PR changed before dispatch; no comment published' >&2
+            exit 1
+          }
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body-file review-repair-comment.md
+
+      - name: Clear stage:fix for a future authorized retry
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh issue edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --remove-label 'stage:fix'
