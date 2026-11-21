@@ -1,0 +1,127 @@
+name: Issue implementation dispatch
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: issue-implementation-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: >-
+      github.event.label.name == 'stage:ready-to-implement' &&
+      github.event.issue.state == 'open'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Verify authorized approver and approved plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          TRIGGER_ACTOR: ${{ github.event.sender.login }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+
+          def gh_json(*args):
+              return json.loads(subprocess.check_output(['gh', 'api', *args], text=True))
+
+          repo = os.environ['GITHUB_REPOSITORY']
+          number = os.environ['ISSUE_NUMBER']
+          actor = os.environ['TRIGGER_ACTOR']
+          owner = os.environ['REPOSITORY_OWNER']
+
+          # Lab-only PM policy: repository owner is the authorized approver.
+          # Replace with a maintained allowlist/team membership check for E.C.H.O.
+          if actor.casefold() != owner.casefold():
+              sys.exit(f'Approval denied: {actor} is not the repository owner')
+
+          issue = gh_json(f'repos/{repo}/issues/{number}')
+          if issue['state'] != 'open':
+              sys.exit('Issue is not open')
+          labels = {item['name'] for item in issue.get('labels', [])}
+          if 'stage:awaiting-approval' not in labels:
+              sys.exit('Missing stage:awaiting-approval; no pending plan approval')
+          if 'stage:blocked' in labels:
+              sys.exit('Blocked issue cannot be implemented')
+          if any(a.get('login', '').startswith('copilot-swe-agent') for a in issue.get('assignees', [])):
+              sys.exit('Copilot already assigned; avoiding duplicate dispatch')
+
+          comment_pages = gh_json('--paginate', '--slurp', f'repos/{repo}/issues/{number}/comments?per_page=100')
+          comments = [c for page in comment_pages for c in page]
+          plans = [
+              c for c in comments
+              if '<!-- automated-planning-v1 -->' in (c.get('body') or '')
+              and c.get('user', {}).get('login') == 'github-actions[bot]'
+          ]
+          if not plans:
+              sys.exit('No bot-published automated plan found')
+          latest = max(plans, key=lambda c: c['id'])
+          body = latest.get('body') or ''
+          ready = re.search(
+              r'(?ms)^#{2,4}\s+Planning status\s*\n\s*\*\*READY_FOR_APPROVAL\*\*\s*(?:\n|$)',
+              body,
+          )
+          if not ready:
+              sys.exit('Latest bot-published plan is not READY_FOR_APPROVAL')
+          print(f'Authorized by {actor}. Approved bot plan comment: {latest["html_url"]}')
+          PY
+
+      - name: Assign Issue to Copilot custom implementer
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_ASSIGN_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          test -n "${GH_TOKEN:-}" || {
+            echo 'Missing COPILOT_ASSIGN_TOKEN secret' >&2
+            exit 1
+          }
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          payload = {
+              'assignees': ['copilot-swe-agent[bot]'],
+              'agent_assignment': {
+                  'target_repo': os.environ['GITHUB_REPOSITORY'],
+                  'base_branch': 'main',
+                  'custom_agent': 'implementer',
+                  'custom_instructions': (
+                      'Implement only the latest bot-published READY_FOR_APPROVAL plan '
+                      'in this Issue, subject to the lab architecture and the repository '
+                      'implementer agent policy. Do not change .github/, AGENTS.md, '
+                      'or docs/architecture/. Never merge the pull request.'
+                  ),
+              },
+          }
+          Path('copilot-assignment.json').write_text(json.dumps(payload))
+          PY
+          gh api --method POST \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/assignees" \
+            --input copilot-assignment.json > /dev/null
+
+      - name: Mark implementation as started
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh issue edit "$ISSUE_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --remove-label 'stage:ready-to-implement' \
+            --remove-label 'stage:awaiting-approval' \
+            --add-label 'stage:implementing'
