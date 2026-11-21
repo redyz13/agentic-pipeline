@@ -148,6 +148,10 @@ jobs:
 
       - name: Validate reviewer status format
         run: |
+          echo "=== REVIEWER REPORT ==="
+          cat "$RUNNER_TEMP/reviewer-report.md"
+          echo "=== END REPORT ==="
+
           python3 - <<'PY'
           import os, re, sys
           from pathlib import Path
