@@ -72,3 +72,5 @@ export class TaskManager {
     return this.create(title, description);
   }
 }
+
+export default TaskManager;
