@@ -103,10 +103,14 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           copilot --agent=tester --trust-folder \
-            --available-tools='view,grep,glob,edit' \
+            --available-tools='view,grep,glob,create,edit,apply_patch' \
             --allow-tool='read,write' \
             --no-ask-user -s \
             -p "$(cat "$RUNNER_TEMP/testing-request.txt")" > "$RUNNER_TEMP/tester-report.md"
+            echo "=== TESTER REPORT ==="
+            cat "$RUNNER_TEMP/tester-report.md"
+            echo "=== MODIFIED FILES ==="
+            git status --short
 
       - name: Enforce tests-only file changes
         run: |
