@@ -1,14 +1,22 @@
 import { TaskManager } from "./task-manager.js";
 
-const storage = globalThis.localStorage ?? null;
 const form = document.querySelector("#task-form");
 const titleInput = document.querySelector("#task-title");
 const descriptionInput = document.querySelector("#task-description");
 const taskList = document.querySelector("#task-list");
 const error = document.querySelector("#task-error");
+let storage = null;
+let storageAccessError = null;
+
+try {
+  storage = globalThis.localStorage ?? null;
+} catch (failure) {
+  storageAccessError = failure;
+}
+
 const manager = new TaskManager(storage);
 
-if (manager.loadError) {
+if (storageAccessError || manager.loadError) {
   error.textContent = "Unable to load saved tasks. You can continue creating new tasks.";
 }
 

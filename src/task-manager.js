@@ -89,8 +89,13 @@ export class TaskManager {
 
     try {
       const tasks = JSON.parse(saved);
-      return Array.isArray(tasks) ? sortByReverseChronological(tasks) : [];
-    } catch {
+      if (!Array.isArray(tasks)) {
+        this.loadError = new Error("Saved tasks are invalid");
+        return [];
+      }
+      return sortByReverseChronological(tasks);
+    } catch (error) {
+      this.loadError = error;
       return [];
     }
   }
