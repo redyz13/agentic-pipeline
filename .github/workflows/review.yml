@@ -151,15 +151,20 @@ jobs:
           echo "=== REVIEWER REPORT ==="
           cat "$RUNNER_TEMP/reviewer-report.md"
           echo "=== END REPORT ==="
-
           python3 - <<'PY'
           import os, re, sys
           from pathlib import Path
           body = (Path(os.environ['RUNNER_TEMP']) / 'reviewer-report.md').read_text()
-          if not re.match(r'^REVIEW_STATUS: (PASS|CHANGES_REQUESTED|INCONCLUSIVE)\s*$', body.splitlines()[0]):
-              sys.exit('Reviewer did not produce a valid REVIEW_STATUS header')
+          status_lines = [
+              (i, line.strip())
+              for i, line in enumerate(body.splitlines())
+              if re.fullmatch(r'REVIEW_STATUS: (PASS|CHANGES_REQUESTED|INCONCLUSIVE)', line.strip())
+          ]
+          if len(status_lines) != 1 or status_lines[0][0] > 7:
+              sys.exit('Reviewer must produce exactly one REVIEW_STATUS header near the start')
           if len(body) < 180:
               sys.exit('Reviewer report is unexpectedly short')
+          print('Validated reviewer status:', status_lines[0][1])
           PY
 
       - name: Upload report for controlled publication
@@ -212,11 +217,14 @@ jobs:
           if current_sha != expected_sha:
               sys.exit('PR changed since AI review. No stale report published; rerun review.')
           report = Path('reviewer-report.md').read_text()
-          match = re.match(r'^REVIEW_STATUS: (PASS|CHANGES_REQUESTED|INCONCLUSIVE)\s*$',
-                           report.splitlines()[0])
-          if not match:
-              sys.exit('Invalid reviewer status')
-          status = match.group(1)
+          status_lines = [
+              (i, line.strip())
+              for i, line in enumerate(report.splitlines())
+              if re.fullmatch(r'REVIEW_STATUS: (PASS|CHANGES_REQUESTED|INCONCLUSIVE)', line.strip())
+          ]
+          if len(status_lines) != 1 or status_lines[0][0] > 7:
+              sys.exit('Invalid or ambiguous reviewer status')
+          status = status_lines[0][1].split(': ', 1)[1]
           header = ('<!-- specialist-review-v1 -->\n'
                     f'## Specialist AI review — {status}\n\n'
                     f'**Reviewed revision:** `{expected_sha}`\n\n'
