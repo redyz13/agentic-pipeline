@@ -1,4 +1,34 @@
 let nextId = 1;
+const MAX_TITLE_LENGTH = 120;
+const MAX_DESCRIPTION_LENGTH = 1000;
+
+function toTimestamp(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return 0;
+}
+
+function sortByReverseChronological(tasks) {
+  tasks.sort((left, right) => toTimestamp(right.createdAt) - toTimestamp(left.createdAt));
+  return tasks;
+}
+
+function updateNextId(tasks) {
+  let maxId = 0;
+  for (const task of tasks) {
+    if (typeof task?.id === "number" && Number.isFinite(task.id)) {
+      maxId = Math.max(maxId, task.id);
+    }
+  }
+  nextId = Math.max(nextId, maxId + 1);
+}
 
 export function createTask(title, description = "") {
   if (typeof title !== "string") {
@@ -9,6 +39,9 @@ export function createTask(title, description = "") {
   if (!normalizedTitle) {
     throw new RangeError("Task title is required");
   }
+  if (normalizedTitle.length > MAX_TITLE_LENGTH) {
+    throw new RangeError(`Task title must be ${MAX_TITLE_LENGTH} characters or fewer`);
+  }
 
   if (description == null) {
     description = "";
@@ -16,18 +49,25 @@ export function createTask(title, description = "") {
   if (typeof description !== "string") {
     throw new TypeError("Task description must be a string");
   }
+  const normalizedDescription = description.trim();
+  if (normalizedDescription.length > MAX_DESCRIPTION_LENGTH) {
+    throw new RangeError(`Task description must be ${MAX_DESCRIPTION_LENGTH} characters or fewer`);
+  }
 
   return {
     id: nextId++,
     title: normalizedTitle,
-    description: description.trim()
+    description: normalizedDescription,
+    createdAt: new Date().toISOString()
   };
 }
 
 export class TaskManager {
   constructor(storage = null) {
     this.storage = storage;
+    this.loadError = null;
     this.tasks = this.loadTasks();
+    updateNextId(this.tasks);
   }
 
   loadTasks() {
@@ -35,14 +75,21 @@ export class TaskManager {
       return [];
     }
 
-    const saved = this.storage.getItem("tasks");
+    let saved;
+    try {
+      saved = this.storage.getItem("tasks");
+    } catch (error) {
+      this.loadError = error;
+      return [];
+    }
+
     if (!saved) {
       return [];
     }
 
     try {
       const tasks = JSON.parse(saved);
-      return Array.isArray(tasks) ? tasks : [];
+      return Array.isArray(tasks) ? sortByReverseChronological(tasks) : [];
     } catch {
       return [];
     }
@@ -50,7 +97,7 @@ export class TaskManager {
 
   create(title, description) {
     const task = createTask(title, description);
-    const tasks = [...this.tasks, task];
+    const tasks = sortByReverseChronological([...this.tasks, task]);
 
     if (this.storage) {
       this.storage.setItem("tasks", JSON.stringify(tasks));

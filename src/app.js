@@ -1,13 +1,16 @@
 import { TaskManager } from "./task-manager.js";
 
 const storage = globalThis.localStorage ?? null;
-const manager = new TaskManager(storage);
-
 const form = document.querySelector("#task-form");
 const titleInput = document.querySelector("#task-title");
 const descriptionInput = document.querySelector("#task-description");
 const taskList = document.querySelector("#task-list");
 const error = document.querySelector("#task-error");
+const manager = new TaskManager(storage);
+
+if (manager.loadError) {
+  error.textContent = "Unable to load saved tasks. You can continue creating new tasks.";
+}
 
 function renderTasks() {
   taskList.replaceChildren();

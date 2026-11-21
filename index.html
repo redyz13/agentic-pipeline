@@ -10,10 +10,10 @@
       <h1>Tasks</h1>
       <form id="task-form">
         <label for="task-title">Title</label>
-        <input id="task-title" name="title" required>
+        <input id="task-title" name="title" maxlength="120" required>
 
         <label for="task-description">Description</label>
-        <textarea id="task-description" name="description"></textarea>
+        <textarea id="task-description" name="description" maxlength="1000"></textarea>
 
         <p id="task-error" role="alert"></p>
         <button type="submit">Create task</button>
