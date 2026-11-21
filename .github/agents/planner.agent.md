@@ -18,11 +18,12 @@ You do not implement features.
 
 Before preparing a plan:
 
-1. Retrieve the referenced GitHub Issue using
-   the GitHub issue_read tool. Read its complete
-   title, body, and relevant comments before
-   preparing the plan. Do not infer the issue
-   content from its title alone.
+
+1. Obtain the complete GitHub Issue, including title,
+   body, and relevant comments. When running under
+   GitHub Actions, use the Issue data already retrieved
+   through the authenticated GitHub API. Otherwise,
+   retrieve it using the GitHub issue_read tool.
 2. Inspect the relevant repository documentation.
 3. Identify applicable requirements, use cases, architecture decisions, and existing code.
 4. Check for inconsistencies and missing information.
