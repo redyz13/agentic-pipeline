@@ -107,6 +107,10 @@ jobs:
             --allow-tool='read,write' \
             --no-ask-user -s \
             -p "$(cat "$RUNNER_TEMP/testing-request.txt")" > "$RUNNER_TEMP/tester-report.md"
+            echo "=== TESTER REPORT ==="
+            cat "$RUNNER_TEMP/tester-report.md"
+            echo "=== MODIFIED FILES ==="
+            git status --short
 
       - name: Enforce tests-only file changes
         run: |
