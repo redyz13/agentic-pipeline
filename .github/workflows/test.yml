@@ -249,3 +249,10 @@ jobs:
           Path('pr-test-comment.md').write_text(body)
           PY
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file pr-test-comment.md
+        
+      - name: Enforce independent test results
+        run: |
+          if [ "$(cat test-exit-code.txt)" != "0" ]; then
+            echo "::error::Independent acceptance tests failed"
+            exit 1
+          fi
