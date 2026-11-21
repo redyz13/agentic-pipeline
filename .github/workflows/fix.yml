@@ -14,22 +14,71 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  dispatch:
-    name: Validate failure and request repair
+  verify:
+    name: Rerun independent tests on the exact PR commit
     if: >-
       github.event.label.name == 'stage:fix' &&
       github.event.sender.login == github.repository_owner &&
       github.event.pull_request.state == 'open' &&
       github.event.pull_request.draft == true &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      tested_sha: ${{ steps.recheck.outputs.tested_sha }}
+    steps:
+      - name: Check out exact PR commit without write credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Recheck independent acceptance tests
+        id: recheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f tests/independent-acceptance.test.js || {
+            echo 'Independent acceptance test suite is missing' >&2
+            exit 1
+          }
+          echo "tested_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          set +e
+          node --test tests/*.test.js > "$RUNNER_TEMP/repair-validation.txt" 2>&1
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/repair-validation.txt"
+          if [ "$code" -eq 0 ]; then
+            echo 'Tests already pass: a repair request is unnecessary' >&2
+            exit 1
+          fi
+          echo "Independent tests failed on $(git rev-parse HEAD) — eligible for repair review."
+
+  dispatch:
+    name: Validate approval and request repair on the same PR
+    needs: verify
+    if: needs.verify.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
     steps:
-      - name: Verify latest tester failure and implementation authorization
+      - name: Verify current revision, trusted report, and authorization
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPOSITORY: ${{ github.repository }}
+          TESTED_SHA: ${{ needs.verify.outputs.tested_sha }}
         run: |
           python3 - <<'PY'
           import json
@@ -49,44 +98,44 @@ jobs:
           pr = gh_json(f'repos/{repo}/pulls/{number}')
           if not pr.get('draft') or pr.get('base', {}).get('ref') != 'main':
               sys.exit('Repair is limited to a Draft PR targeting main')
-          body = pr.get('body') or ''
-          refs = re.findall(r'(?im)\b(?:closes|fixes|resolves)\s+#(\d+)\b', body)
+          if pr.get('head', {}).get('sha') != os.environ['TESTED_SHA']:
+              sys.exit('PR changed while tests were rerun: trigger a fresh stage:fix event')
+          if pr.get('head', {}).get('repo', {}).get('full_name') != repo:
+              sys.exit('Repair is limited to a same-repository PR')
+
+          refs = re.findall(r'(?im)\b(?:closes|fixes|resolves)\s+#(\d+)\b', pr.get('body') or '')
           if len(set(refs)) != 1:
-              sys.exit('PR must reference exactly one issue using Closes/Fixes/Resolves #N')
+              sys.exit('PR must reference exactly one Issue using Closes/Fixes/Resolves #N')
           issue_number = int(refs[0])
           issue = gh_json(f'repos/{repo}/issues/{issue_number}')
           issue_labels = {label['name'] for label in issue.get('labels', [])}
           if 'stage:implementing' not in issue_labels:
-              sys.exit('Linked issue is not in implementation stage')
+              sys.exit('Linked Issue is not in implementation stage')
 
           issue_comments = gh_json(f'repos/{repo}/issues/{issue_number}/comments?per_page=100')
           if len(issue_comments) == 100:
-              sys.exit('Too many issue comments: inspect authorization manually')
+              sys.exit('Too many Issue comments: inspect authorization manually')
           plans = [c for c in issue_comments
                    if '<!-- automated-planning-v1 -->' in (c.get('body') or '')
                    and (c.get('user') or {}).get('login') == 'github-actions[bot]']
           if not plans or not re.search(
               r'(?m)^\s*\*\*READY_FOR_APPROVAL\*\*\s*$', plans[-1]['body']
           ):
-              sys.exit('Latest plan is not READY_FOR_APPROVAL')
+              sys.exit('Latest approved plan is missing or not READY_FOR_APPROVAL')
 
           comments = gh_json(f'repos/{repo}/issues/{number}/comments?per_page=100')
           if len(comments) == 100:
               sys.exit('Too many PR comments: inspect manually')
+          # The testing workflow posted the report using the owner's PAT.
+          owner = repo.split('/')[0]
           reports = [c for c in comments
-                     if '<!-- independent-testing-v1 -->' in (c.get('body') or '')]
+                     if '<!-- independent-testing-v1 -->' in (c.get('body') or '')
+                     and (c.get('user') or {}).get('login') == owner]
           if not reports:
-              sys.exit('No independent tester report on this PR')
-          latest_report = reports[-1]
-          latest = latest_report['body']
-          # Prevent acting on a failure report that predates the current head commit.
-          head_sha = pr['head']['sha']
-          commit = gh_json(f'repos/{repo}/commits/{head_sha}')
-          commit_date = commit['commit']['committer']['date']
-          if commit_date > latest_report['created_at']:
-              sys.exit('Tester report is stale: rerun independent testing on the current PR head')
+              sys.exit('No trusted independent tester report on this PR')
+          latest = reports[-1]['body']
           if not re.search(r'(?m)^## Independent tester\s+.{0,10}FAIL\b', latest):
-              sys.exit('Latest independent tester report is not FAIL')
+              sys.exit('Latest independent tester report does not report FAIL')
 
           repair_count = sum('<!-- controlled-repair-v1 -->' in (c.get('body') or '')
                              for c in comments)
@@ -96,23 +145,24 @@ jobs:
           message = (
               '@copilot\n\n'
               '<!-- controlled-repair-v1 -->\n'
-              'Please continue working on **this pull request**, based on the latest '
-              'independent tester FAIL report, the linked Issue, its approved plan, and '
-              '`docs/architecture/lab-architecture.md`.\n\n'
+              'Continue working on **this pull request**. An isolated GitHub Actions job '
+              f're-ran the independent tests on commit `{os.environ["TESTED_SHA"]}` and confirmed '
+              'that they fail. Consult the latest independent tester report, the linked Issue, '
+              'the approved plan and `docs/architecture/lab-architecture.md`.\n\n'
               '**Required procedure:**\n'
-              '1. Inspect each failing assertion and trace it to an explicit approved requirement.\n'
-              '2. Correct only demonstrated defects in application code; preserve the original scope.\n'
-              '3. If a test asserts unsupported behavior or conflicts with the architecture, '
-              'do NOT change production behavior just to satisfy it. Explain that conflict '
-              'in a PR comment and request a human decision. Do not change independent tests.\n'
+              '1. Inspect current failing assertions and trace each to an approved requirement.\n'
+              '2. Correct only genuine defects in application code; preserve approved scope.\n'
+              '3. If any independent test conflicts with the architecture or demands unsupported '
+              'behavior, do NOT alter production code merely to satisfy it. Explain the conflict '
+              'in a PR comment and request human clarification. Do not change independent tests.\n'
               '4. Do not modify `.github/`, `AGENTS.md`, `docs/architecture/`, or '
-              '`tests/independent-acceptance.test.js`. Do not introduce dependencies.\n'
-              '5. Run `npm test`, provide the actual outcome, and push fixes to the '
-              'existing PR branch. Never merge the PR.\n\n'
+              '`tests/independent-acceptance.test.js`. Do not add dependencies.\n'
+              '5. Run `npm test`, provide the actual outcome and push any fixes to the '
+              'existing PR branch. Never merge.\n\n'
               f'Controlled repair attempt: {repair_count + 1} of 2.\n'
           )
           Path('repair-comment.md').write_text(message, encoding='utf-8')
-          print(f'Validated Issue #{issue_number}; tester FAIL; repair attempt {repair_count + 1}/2')
+          print(f'Validated Issue #{issue_number}; current test FAIL; repair attempt {repair_count + 1}/2')
           PY
 
       - name: Ask Copilot to correct the existing PR
