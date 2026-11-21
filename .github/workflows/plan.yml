@@ -7,6 +7,7 @@ on:
 permissions:
   contents: read
   issues: write
+  copilot-requests: write
 
 concurrency:
   group: issue-planning-${{ github.event.issue.number }}
@@ -66,12 +67,8 @@ jobs:
 
       - name: Generate the plan (read-only)
         env:
-          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_PAT }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          test -n "$COPILOT_GITHUB_TOKEN" || {
-            echo 'Missing COPILOT_PAT repository secret' >&2
-            exit 1
-          }
           copilot \
             --agent=planner \
             --trust-folder \
