@@ -71,7 +71,7 @@ jobs:
           latest = max(plans, key=lambda c: c['id'])
           body = latest.get('body') or ''
           ready = re.search(
-              r'(?ms)^#{2,4}\s+Planning status\s*\n\s*\*\*READY_FOR_APPROVAL\*\*\s*(?:\n|$)',
+              r'(?m)^\s*\*\*READY_FOR_APPROVAL\*\*\s*$',
               body,
           )
           if not ready:
