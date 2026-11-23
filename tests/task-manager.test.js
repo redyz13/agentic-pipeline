@@ -27,7 +27,7 @@ test("saves and lists a created task", () => {
     getItem(key) {
       return values.get(key) ?? null;
     },
-    setItem(key, value) {
+    saveItem(key, value) {
       values.set(key, value);
     }
   };
