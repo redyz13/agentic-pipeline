@@ -44,7 +44,7 @@ test("does not retain a task when persistence fails", () => {
     getItem() {
       return null;
     },
-    saveItem() {
+    setItem() {
       throw new Error("disk full");
     }
   });
@@ -56,8 +56,13 @@ test("does not retain a task when persistence fails", () => {
 test("recovers from a storage read failure and allows task creation", () => {
   const values = new Map();
   let readError;
+  let shouldFailRead = true;
   const storage = {
-    getItem() {
+    getItem(key) {
+      if (!shouldFailRead) {
+        return values.get(key) ?? null;
+      }
+      shouldFailRead = false;
       readError = new Error("storage unavailable");
       throw readError;
     },
