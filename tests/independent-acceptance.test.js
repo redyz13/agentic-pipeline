@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-import { createTask, TaskManager } from "../src/task-manager.js";
+import { createTask, searchTasks, TaskManager } from "../src/task-manager.js";
 
 test("valid task creation trims text and supplies model metadata", () => {
   const task = createTask("  Ship change  ", "  Run the targeted tests  ");
@@ -120,4 +120,114 @@ test("the form and renderer expose accessible feedback and safe text rendering",
   assert.match(appSource, /\.textContent\s*=/);
   assert.match(appSource, /manager\.create\(/);
   assert.match(appSource, /renderTasks\(\)/);
+});
+
+test("dashboard structure exposes overview, search, task list, and distinct empty states", async () => {
+  const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
+
+  assert.match(html, /<header[^>]*class="workspace-header"/);
+  assert.match(html, /id="total-count"/);
+  assert.match(html, /id="match-count"/);
+  assert.match(html, /<label[^>]+for="task-search"[^>]*>[\s\S]*?Search tasks/);
+  assert.match(html, /id="task-search"/);
+  assert.match(html, /id="task-list"/);
+  assert.match(html, /id="task-empty"[^>]+role="status"/);
+  assert.match(html, /id="task-success"[^>]+role="status"/);
+});
+
+test("live search matches title and description case-insensitively and not metadata", () => {
+  const tasks = [
+    { id: 1, title: "Write Release Notes", description: "Document the Dashboard", createdAt: "2026-01-01" },
+    { id: 2, title: "Fix build", description: "Update the workflow", createdAt: "2026-01-02" }
+  ];
+
+  assert.deepEqual(searchTasks(tasks, "release").map((task) => task.id), [1]);
+  assert.deepEqual(searchTasks(tasks, "DASHBOARD").map((task) => task.id), [1]);
+  assert.deepEqual(searchTasks(tasks, "workflow").map((task) => task.id), [2]);
+  assert.deepEqual(searchTasks(tasks, "2026"), []);
+  assert.deepEqual(searchTasks(tasks, "2"), [], "search must not match ids");
+  assert.equal(tasks.length, 2, "search must not mutate the source array");
+});
+
+test("whitespace-only search clears filtering and does not alter task order", () => {
+  const tasks = [
+    { id: 1, title: "Old", description: "", createdAt: "2026-01-01" },
+    { id: 2, title: "New", description: "", createdAt: "2026-01-02" }
+  ];
+  const result = searchTasks(tasks, " \t\n ");
+
+  assert.notEqual(result, tasks);
+  assert.deepEqual(result, tasks);
+});
+
+test("search safely handles HTML-like text and never interprets it as markup", () => {
+  const hostile = '<img src=x onerror="alert(1)">';
+  const tasks = [{ id: 1, title: hostile, description: "<script>alert(1)</script>", createdAt: "2026-01-01" }];
+
+  assert.deepEqual(searchTasks(tasks, "img src"), tasks);
+  assert.deepEqual(searchTasks(tasks, "script"), tasks);
+});
+
+test("persistence write failure preserves existing in-memory tasks", () => {
+  const existing = { id: 1, title: "Existing", description: "", createdAt: "2026-01-01T00:00:00.000Z" };
+  const manager = new TaskManager({
+    getItem() {
+      return JSON.stringify([existing]);
+    },
+    setItem() {
+      throw new Error("disk full");
+    }
+  });
+
+  assert.throws(() => manager.create("Unsaved", "Must not appear"), /disk full/);
+  assert.deepEqual(manager.list(), [existing]);
+});
+
+test("corrupt persisted JSON leaves an empty usable manager with load feedback data", () => {
+  const manager = new TaskManager({
+    getItem() {
+      return "{not valid json";
+    }
+  });
+
+  assert.deepEqual(manager.list(), []);
+  assert.ok(manager.loadError instanceof Error);
+  assert.equal(manager.create("Continue safely", "").title, "Continue safely");
+});
+
+test("dashboard renderer updates counts and handles both empty states", async () => {
+  const [appSource, html] = await Promise.all([
+    readFile(new URL("../src/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../index.html", import.meta.url), "utf8")
+  ]);
+
+  assert.match(appSource, /totalCount\.textContent\s*=/);
+  assert.match(appSource, /matchCount\.textContent\s*=/);
+  assert.match(appSource, /manager\.search\(searchInput\.value\)/);
+  assert.match(appSource, /searchInput\.addEventListener\("input",\s*renderTasks\)/);
+  assert.match(appSource, /No tasks yet\. Create your first task above\./);
+  assert.match(appSource, /No tasks match your search\./);
+  assert.match(html, /role="status"[\s\S]*aria-live="polite"|aria-live="polite"[\s\S]*role="status"/);
+});
+
+test("creation and persistence feedback remain visible and announced", async () => {
+  const [html, appSource] = await Promise.all([
+    readFile(new URL("../index.html", import.meta.url), "utf8"),
+    readFile(new URL("../src/app.js", import.meta.url), "utf8")
+  ]);
+
+  assert.match(html, /id="task-error"[^>]+role="alert"/);
+  assert.match(html, /id="task-success"[^>]+role="status"/);
+  assert.match(appSource, /Task created successfully\./);
+  assert.match(appSource, /Unable to save task because browser storage is unavailable\./);
+  assert.match(appSource, /Unable to load saved tasks\. You can continue creating new tasks\./);
+});
+
+test("responsive stylesheet includes desktop and narrow-screen layouts", async () => {
+  const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+
+  assert.match(css, /@media\s*\([^)]*(max|min)-width/s);
+  assert.match(css, /@media\s*\([^)]*max-width\s*:\s*(?:[678][0-9]{2}|[1][01][0-9]{2})px/s);
+  assert.match(css, /:focus-visible/);
+  assert.match(css, /grid-template-columns/);
 });
