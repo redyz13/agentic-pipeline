@@ -1,10 +1,11 @@
+# Merge guardrails: verify technical and scope constraints only.
+# Human approval is enforced by the main-protection Ruleset.
+# CODEOWNERS must cover /.github/, /docs/architecture/, /AGENTS.md, /.gitmodules.
 name: Merge guardrails
 
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review, edited]
-  pull_request_review:
-    types: [submitted, dismissed]
 
 permissions:
   contents: read
@@ -63,8 +64,6 @@ jobs:
               reject('PR changed during validation; retry on the current revision')
           if pr['base']['ref'] != 'main' or pr['head']['repo']['full_name'] != repo:
               reject('Only same-repository pull requests targeting main are supported')
-          if pr['draft']:
-              reject('Draft PRs cannot pass the merge policy')
 
           files = api(f'repos/{repo}/pulls/{pr_number}/files?per_page=100', True)
           if not files or len(files) >= 300:
@@ -89,28 +88,22 @@ jobs:
 
           if protected_paths:
               # Governance PRs are isolated from application changes.
+              # Ruleset requires 1 approval and review from a Code Owner.
               if ordinary_paths:
                   reject('Governance and application files must be changed in separate PRs: '
                          + ', '.join(sorted(set(ordinary_paths))[:15]))
               author = pr['user']['login'].casefold()
               if author not in allowed_pms:
                   reject('Governance PR author is not in GOVERNANCE_PM_USERS')
-              reviews = api(f'repos/{repo}/pulls/{pr_number}/reviews?per_page=100', True)
-              latest_per_reviewer = {}
-              for review in reviews:
-                  if review.get('user') and review.get('submitted_at'):
-                      latest_per_reviewer[review['user']['login'].casefold()] = review
-              eligible = [
-                  login for login, review in latest_per_reviewer.items()
-                  if login in allowed_pms
-                  and login != author
-                  and review.get('state') == 'APPROVED'
-                  and review.get('commit_id') == head_sha
-              ]
-              if not eligible:
-                  reject('Governance changes require approval at the current SHA by a different authorized PM')
-              print('Governance PR verified: isolated protected changes and authorized peer approval')
+              # Approvals are exclusively enforced by GitHub Rulesets and
+              # CODEOWNERS. Do not fail CI just because a human review is pending.
+              print('Governance PR verified: protected changes isolated; authorized PM author')
           else:
+              # GitHub itself prevents merging Draft PRs. Do not treat normal
+              # work-in-progress as an error before a specialist review exists.
+              if pr['draft']:
+                  print('Draft application PR: specialist review pending (merge blocked by GitHub)')
+                  sys.exit(0)
               # For application PRs, the AI review must refer to the exact head commit.
               comments = api(f'repos/{repo}/issues/{pr_number}/comments?per_page=100', True)
               reports = [
