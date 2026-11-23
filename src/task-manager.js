@@ -16,7 +16,17 @@ function toTimestamp(value) {
 }
 
 function sortByReverseChronological(tasks) {
-  tasks.sort((left, right) => toTimestamp(right.createdAt) - toTimestamp(left.createdAt));
+  tasks.sort((left, right) => {
+    const timestampDifference =
+      toTimestamp(right.createdAt) - toTimestamp(left.createdAt);
+    if (timestampDifference !== 0) {
+      return timestampDifference;
+    }
+
+    const rightId = typeof right?.id === "number" ? right.id : 0;
+    const leftId = typeof left?.id === "number" ? left.id : 0;
+    return rightId - leftId;
+  });
   return tasks;
 }
 
@@ -60,6 +70,20 @@ export function createTask(title, description = "") {
     description: normalizedDescription,
     createdAt: new Date().toISOString()
   };
+}
+
+export function searchTasks(tasks, query) {
+  const normalizedQuery = typeof query === "string" ? query.trim().toLowerCase() : "";
+  if (!normalizedQuery) {
+    return [...tasks];
+  }
+
+  return tasks.filter((task) => {
+    const title = typeof task?.title === "string" ? task.title : "";
+    const description = typeof task?.description === "string" ? task.description : "";
+    return title.toLowerCase().includes(normalizedQuery)
+      || description.toLowerCase().includes(normalizedQuery);
+  });
 }
 
 export class TaskManager {
