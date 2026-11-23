@@ -62,6 +62,20 @@ export function createTask(title, description = "") {
   };
 }
 
+export function searchTasks(tasks, query) {
+  const normalizedQuery = typeof query === "string" ? query.trim().toLowerCase() : "";
+  if (!normalizedQuery) {
+    return [...tasks];
+  }
+
+  return tasks.filter((task) => {
+    const title = typeof task?.title === "string" ? task.title : "";
+    const description = typeof task?.description === "string" ? task.description : "";
+    return title.toLowerCase().includes(normalizedQuery)
+      || description.toLowerCase().includes(normalizedQuery);
+  });
+}
+
 export class TaskManager {
   constructor(storage = null) {
     this.storage = storage;
