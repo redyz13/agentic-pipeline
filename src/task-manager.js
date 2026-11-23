@@ -16,7 +16,17 @@ function toTimestamp(value) {
 }
 
 function sortByReverseChronological(tasks) {
-  tasks.sort((left, right) => toTimestamp(right.createdAt) - toTimestamp(left.createdAt));
+  tasks.sort((left, right) => {
+    const timestampDifference =
+      toTimestamp(right.createdAt) - toTimestamp(left.createdAt);
+    if (timestampDifference !== 0) {
+      return timestampDifference;
+    }
+
+    const rightId = typeof right?.id === "number" ? right.id : 0;
+    const leftId = typeof left?.id === "number" ? left.id : 0;
+    return rightId - leftId;
+  });
   return tasks;
 }
 
