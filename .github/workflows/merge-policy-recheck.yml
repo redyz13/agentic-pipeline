@@ -1,0 +1,101 @@
+name: Recheck merge policy after specialist review
+
+on:
+  workflow_run:
+    workflows: ["Specialist AI review"]
+    types: [completed]
+
+permissions:
+  actions: write
+  pull-requests: read
+
+jobs:
+  recheck:
+    name: Recheck merge policy
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Re-run failed merge gate only after a valid current review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          REVIEW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+
+          repo = os.environ['GITHUB_REPOSITORY']
+          branch = os.environ.get('REVIEW_BRANCH', '')
+          reviewed_run_sha = os.environ.get('REVIEW_RUN_SHA', '')
+
+          def api(endpoint, method='GET'):
+              command = ['gh', 'api']
+              if method != 'GET':
+                  command.extend(['--method', method])
+              command.append(endpoint)
+              output = subprocess.check_output(command, text=True)
+              return json.loads(output) if output.strip() else None
+
+          def skip(reason):
+              print('No merge-policy retry needed: ' + reason)
+              sys.exit(0)
+
+          # Never execute PR code, read artifacts, or run on a fork.
+          if not branch or not reviewed_run_sha:
+              skip('review run has no branch or SHA')
+          pull_requests = api(f'repos/{repo}/pulls?state=open&per_page=100')
+          matches = [pr for pr in pull_requests
+                     if pr['head']['ref'] == branch
+                     and pr['head']['repo']['full_name'] == repo
+                     and pr['base']['ref'] == 'main']
+          if len(matches) != 1:
+              skip('no unique same-repository open PR on the reviewed branch')
+          pr = matches[0]
+          pr_number = pr['number']
+          current_head_sha = pr['head']['sha']
+
+          # The specialist report must attest to the PR's current HEAD.
+          comments = api(f'repos/{repo}/issues/{pr_number}/comments?per_page=100')
+          reports = [c for c in comments
+                     if (c.get('user') or {}).get('login') == 'github-actions[bot]'
+                     and '<!-- specialist-review-v1 -->' in (c.get('body') or '')]
+          if not reports:
+              skip('missing authenticated specialist report')
+          latest = max(reports, key=lambda c: c['id'])['body']
+          revision = re.search(r'\*\*Reviewed revision:\*\*\s*`([0-9a-f]{40})`', latest)
+          if not revision or revision.group(1) != current_head_sha:
+              skip('latest report is not for current PR HEAD')
+          if not re.search(r'(?m)^## Specialist AI review\s*[—-]\s*PASS\s*$', latest):
+              skip('latest specialist review is not PASS')
+          if not re.search(r'(?m)^REVIEW_STATUS:\s*PASS\s*$', latest):
+              skip('latest specialist report does not confirm PASS')
+
+          # Both workflows run on pull_request; select a gate run for the
+          # same PR branch and GitHub event SHA, never a different revision.
+          response = api(f'repos/{repo}/actions/workflows/guardrails.yml/runs?per_page=100')
+          candidates = [run for run in response.get('workflow_runs', [])
+                        if run.get('head_branch') == branch
+                        and run.get('head_sha') == reviewed_run_sha
+                        and run.get('event') in ('pull_request', 'pull_request_review')]
+          if not candidates:
+              skip('no merge-guardrails execution found for this review event SHA')
+          latest_gate = max(candidates, key=lambda run: run['id'])
+          if latest_gate.get('status') != 'completed':
+              skip('merge gate is still running')
+          if latest_gate.get('conclusion') == 'success':
+              skip('merge gate already succeeded')
+          if latest_gate.get('conclusion') != 'failure':
+              skip('latest merge gate was not a failed run')
+          if latest_gate.get('event') != 'pull_request':
+              skip('do not automatically rerun a review-event gate')
+
+          run_id = latest_gate['id']
+          print(f'Current PR #{pr_number} has a specialist PASS for {current_head_sha}.')
+          print(f'Re-running failed jobs in merge gate run {run_id}.')
+          api(f'repos/{repo}/actions/runs/{run_id}/rerun-failed-jobs', 'POST')
+          PY
