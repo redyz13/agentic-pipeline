@@ -79,6 +79,18 @@ Produce the following structured plan.
 ### Planning status
 READY_FOR_APPROVAL or BLOCKED.
 
+## Strict planning status
+
+The Planning status must contain exactly one of
+the following standalone values:
+
+**READY_FOR_APPROVAL**
+**BLOCKED**
+
+Never invent alternative status values or spellings.
+Before submitting the plan, verify that the status
+matches one of these two values character for character.
+
 ### Objective
 Describe the expected outcome.
 
