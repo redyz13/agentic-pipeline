@@ -79,42 +79,94 @@ jobs:
             -p "$(cat planning-request.txt)" > planning-result.md
           test -s planning-result.md
 
-      - name: Publish plan and update stage
+      - name: Validate, normalize, publish, and replace planning-stage labels
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
           python3 - <<'PY'
-          import json, re
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
           from pathlib import Path
 
-          plan = Path('planning-result.md').read_text()
-          if len(plan) > 60000:
-              raise SystemExit('Planner result too large')
-          ready = bool(re.search(r'(?m)^\s*\*\*READY_FOR_APPROVAL\*\*\s*$', plan))
-          target = 'stage:awaiting-approval' if ready else 'stage:blocked'
-          Path('target-label.txt').write_text(target)
-          body = (
-              '<!-- automated-planning-v1 -->\n'
-              '## Automated implementation plan\n\n'
-              '> AI-generated proposal; human approval is required before implementation.\n\n'
-              + plan
-          )
-          Path('comment-payload.json').write_text(json.dumps({'body': body}))
+          def api(path):
+              return json.loads(subprocess.check_output(['gh', 'api', path], text=True))
+
+          repo = os.environ['GITHUB_REPOSITORY']
+          number = os.environ['ISSUE_NUMBER']
+          issue = api(f'repos/{repo}/issues/{number}')
+          labels = [item['name'] for item in issue.get('labels', [])]
+
+          if issue['state'] != 'open':
+              sys.exit('Cannot publish a plan for a closed Issue')
+          if 'stage:planning' not in labels:
+              sys.exit('Planning label was removed during generation: not publishing a stale plan')
+          if 'stage:implementing' in labels:
+              sys.exit('Issue is already implementing: planning may not overwrite this state')
+
+          raw = Path('planning-result.md').read_text(encoding='utf-8')
+          if len(raw) > 60000 or not raw.strip():
+              sys.exit('Planner result is empty or too large')
+
+          # Accept both # and ### headings, with or without bold around the
+          # exact state token. The published version is ALWAYS canonical.
+          lines = raw.splitlines(keepends=True)
+          headings = [i for i, line in enumerate(lines)
+                      if re.fullmatch(r'\s*#{1,4}\s+Planning status\s*', line, re.I)]
+          state = None
+          if len(headings) == 1:
+              start = headings[0]
+              end = start + 1
+              while end < len(lines) and not lines[end].strip():
+                  end += 1
+              if end < len(lines):
+                  token = lines[end].strip()
+                  if token.startswith('**') and token.endswith('**'):
+                      token = token[2:-2]
+                  if token in {'READY_FOR_APPROVAL', 'BLOCKED'}:
+                      state = token
+                      lines[start:end + 1] = ['### Planning status\n', f'**{state}**\n']
+
+          if state is None:
+              # Fail closed on malformed output, but explain the actual reason.
+              # Do not misclassify a correctly formatted ready state.
+              state = 'BLOCKED'
+              body_plan = ('### Planning status\n**BLOCKED**\n\n'
+                           'Planner output could not be parsed safely. '
+                           'Expected one `Planning status` heading followed by '
+                           '`READY_FOR_APPROVAL` or `BLOCKED`. '
+                           'Human investigation or a new planning run is required.\n\n'
+                           '### Unvalidated planner output\n' + raw)
+              print('::warning::Planner output has no unique valid status')
+          else:
+              body_plan = ''.join(lines)
+
+          body = ('<!-- automated-planning-v1 -->\n'
+                  '## Automated implementation plan\n\n'
+                  '> AI-generated proposal; human approval is required before implementation.\n\n'
+                  + body_plan)
+          Path('comment-payload.json').write_text(
+              json.dumps({'body': body}, ensure_ascii=False), encoding='utf-8')
+
+          target = ('stage:awaiting-approval' if state == 'READY_FOR_APPROVAL'
+                    else 'stage:blocked')
+          transient = {'stage:planning', 'stage:blocked', 'stage:awaiting-approval',
+                       'stage:ready-to-implement', 'stage:triage'}
+          new_labels = [label for label in labels if label not in transient] + [target]
+          Path('stage-labels.json').write_text(
+              json.dumps({'labels': new_labels}), encoding='utf-8')
+          print(f'Normalized planning status: {state}; next stage: {target}')
           PY
+
           gh api -X POST \
             "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments" \
             --input comment-payload.json > /dev/null
 
-          gh issue edit "$ISSUE_NUMBER" \
-            --repo "$GITHUB_REPOSITORY" \
-            --remove-label 'stage:planning' \
-            --add-label "$(cat target-label.txt)"
-
-          if gh issue view "$ISSUE_NUMBER" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json labels --jq '.labels[].name' | grep -qx 'stage:triage'; then
-            gh issue edit "$ISSUE_NUMBER" \
-              --repo "$GITHUB_REPOSITORY" \
-              --remove-label 'stage:triage'
-          fi
+          # Replace the stage labels in one API call, preserving unrelated
+          # labels such as type:feature. No contradictory planning stages.
+          gh api -X PUT \
+            "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/labels" \
+            --input stage-labels.json > /dev/null
