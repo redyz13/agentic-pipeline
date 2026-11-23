@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   verify:
-    name: Rerun independent tests on the exact PR commit
+    name: Reproduce current failures without privileged credentials
     if: >-
       github.event.label.name == 'stage:fix' &&
       github.event.sender.login == github.repository_owner &&
@@ -24,46 +24,44 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
     outputs:
-      tested_sha: ${{ steps.recheck.outputs.tested_sha }}
+      tested_sha: ${{ steps.current.outputs.tested_sha }}
     steps:
-      - name: Check out exact PR commit without write credentials
+      - name: Check out exact untrusted PR source without write credentials
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
           persist-credentials: false
-
-      - name: Set up Node.js
+      - name: Extract approved project repair policy and interpreter from main
+        run: |
+          git fetch --no-tags origin main
+          git show origin/main:.github/repair-policy.json > "$RUNNER_TEMP/repair-policy.json"
+          git show origin/main:.github/scripts/repair_core.py > "$RUNNER_TEMP/repair_core.py"
+      - name: Set up laboratory runtime
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-
-      - name: Recheck independent acceptance tests
-        id: recheck
-        shell: bash
+      - name: Reproduce failures using repository-approved test adapter
+        id: current
         run: |
-          set -euo pipefail
-          test -f tests/independent-acceptance.test.js || {
-            echo 'Independent acceptance test suite is missing' >&2
-            exit 1
-          }
           echo "tested_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          set +e
-          node --test tests/*.test.js > "$RUNNER_TEMP/repair-validation.txt" 2>&1
-          code=$?
-          set -e
-          cat "$RUNNER_TEMP/repair-validation.txt"
-          if [ "$code" -eq 0 ]; then
-            echo 'Tests already pass: a repair request is unnecessary' >&2
-            exit 1
-          fi
-          echo "Independent tests failed on $(git rev-parse HEAD) — eligible for repair review."
+          python3 "$RUNNER_TEMP/repair_core.py" run-tests \
+            --policy "$RUNNER_TEMP/repair-policy.json" --repo . \
+            --output "$RUNNER_TEMP/current-tests.json" --log "$RUNNER_TEMP/current-tests.txt"
+          cat "$RUNNER_TEMP/current-tests.txt"
+          python3 - <<'PY'
+          import json,os
+          data=json.load(open(os.environ['RUNNER_TEMP']+'/current-tests.json'))
+          if not data['failures']:
+              raise SystemExit('No currently failing test case; repair is unnecessary')
+          PY
 
   dispatch:
-    name: Validate approval and request repair on the same PR
+    name: Dispatch only independently verified implementation defects
     needs: verify
     if: needs.verify.result == 'success'
     runs-on: ubuntu-latest
@@ -73,121 +71,83 @@ jobs:
       issues: read
       pull-requests: read
     steps:
-      - name: Verify current revision, trusted report, and authorization
+      - name: Authenticate latest triage on the same SHA and approved scope
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPOSITORY: ${{ github.repository }}
           TESTED_SHA: ${{ needs.verify.outputs.tested_sha }}
         run: |
           python3 - <<'PY'
-          import json
-          import os
-          import re
-          import subprocess
-          import sys
+          import json,os,re,subprocess,sys
           from pathlib import Path
-
-          repo = os.environ['REPOSITORY']
-          number = int(os.environ['PR_NUMBER'])
-
-          def gh_json(endpoint):
-              return json.loads(subprocess.check_output(
-                  ['gh', 'api', endpoint], text=True))
-
-          pr = gh_json(f'repos/{repo}/pulls/{number}')
-          if not pr.get('draft') or pr.get('base', {}).get('ref') != 'main':
-              sys.exit('Repair is limited to a Draft PR targeting main')
-          if pr.get('head', {}).get('sha') != os.environ['TESTED_SHA']:
-              sys.exit('PR changed while tests were rerun: trigger a fresh stage:fix event')
-          if pr.get('head', {}).get('repo', {}).get('full_name') != repo:
-              sys.exit('Repair is limited to a same-repository PR')
-
-          refs = re.findall(r'(?im)\b(?:closes|fixes|resolves)\s+#(\d+)\b', pr.get('body') or '')
-          if len(set(refs)) != 1:
-              sys.exit('PR must reference exactly one Issue using Closes/Fixes/Resolves #N')
-          issue_number = int(refs[0])
-          issue = gh_json(f'repos/{repo}/issues/{issue_number}')
-          issue_labels = {label['name'] for label in issue.get('labels', [])}
-          if 'stage:implementing' not in issue_labels:
-              sys.exit('Linked Issue is not in implementation stage')
-
-          issue_comments = gh_json(f'repos/{repo}/issues/{issue_number}/comments?per_page=100')
-          if len(issue_comments) == 100:
-              sys.exit('Too many Issue comments: inspect authorization manually')
-          plans = [c for c in issue_comments
-                   if '<!-- automated-planning-v1 -->' in (c.get('body') or '')
-                   and (c.get('user') or {}).get('login') == 'github-actions[bot]']
-          if not plans or not re.search(
-              r'(?m)^\s*\*\*READY_FOR_APPROVAL\*\*\s*$', plans[-1]['body']
-          ):
-              sys.exit('Latest approved plan is missing or not READY_FOR_APPROVAL')
-
-          comments = gh_json(f'repos/{repo}/issues/{number}/comments?per_page=100')
-          if len(comments) == 100:
-              sys.exit('Too many PR comments: inspect manually')
-          # The testing workflow posted the report using the owner's PAT.
-          owner = repo.split('/')[0]
-          reports = [c for c in comments
-                     if '<!-- independent-testing-v1 -->' in (c.get('body') or '')
-                     and (c.get('user') or {}).get('login') == owner]
-          if not reports:
-              sys.exit('No trusted independent tester report on this PR')
-          latest = reports[-1]['body']
-          if not re.search(r'(?m)^## Independent tester\s+.{0,10}FAIL\b', latest):
-              sys.exit('Latest independent tester report does not report FAIL')
-
-          # A failure is not automatically an implementation defect. Require
-          # the separately authenticated triage on the exact current HEAD.
-          triages = [c for c in comments
-                     if '<!-- defect-triage-v1 -->' in (c.get('body') or '')
-                     and (c.get('user') or {}).get('login') == 'github-actions[bot]']
-          if not triages:
-              sys.exit('Missing authenticated Defect Triage classification')
-          triage = max(triages, key=lambda c:c['id'])['body']
-          requirements = (
-              f'**Assessed revision:** `{os.environ["TESTED_SHA"]}`',
-              '**Classification:** IMPLEMENTATION_DEFECT',
-              '**Confidence:** HIGH',
-          )
-          if not all(value in triage for value in requirements):
-              sys.exit('Current triage does not authorize implementation repair')
-          pr_labels = {l['name'] for l in pr.get('labels', [])}
-          if 'stage:fix-tests' in pr_labels:
-              sys.exit('Conflicting test repair label present')
-
-          repair_count = sum('<!-- controlled-repair-v1 -->' in (c.get('body') or '')
-                             for c in comments)
-          if repair_count >= 2:
-              sys.exit('Repair limit reached (2). Human intervention required')
-
-          message = (
-              '@copilot\n\n'
-              '<!-- controlled-repair-v1 -->\n'
-              'Continue working on **this pull request**. An isolated GitHub Actions job '
-              f're-ran the independent tests on commit `{os.environ["TESTED_SHA"]}` and confirmed '
-              'that they fail. Consult the latest independent tester report, the linked Issue, '
-              'the approved plan and `docs/architecture/lab-architecture.md`.\n\n'
-              '**Required procedure:**\n'
-              '1. Inspect current failing assertions and trace each to an approved requirement.\n'
-              '2. Correct only genuine defects in application code; preserve approved scope.\n'
-              '3. If any independent test conflicts with the architecture or demands unsupported '
-              'behavior, do NOT alter production code merely to satisfy it. Explain the conflict '
-              'in a PR comment and request human clarification. Do not change independent tests.\n'
-              '4. Do not modify `.github/`, `AGENTS.md`, `docs/architecture/`, or '
-              '`tests/independent-acceptance.test.js`. Do not add dependencies.\n'
-              '5. Run `npm test`, provide the actual outcome and push any fixes to the '
-              'existing PR branch. Never merge.\n\n'
-              f'Controlled repair attempt: {repair_count + 1} of 2.\n'
-          )
-          Path('repair-comment.md').write_text(message, encoding='utf-8')
-          print(f'Validated Issue #{issue_number}; current test FAIL; repair attempt {repair_count + 1}/2')
+          repo,no=os.environ['GITHUB_REPOSITORY'],int(os.environ['PR_NUMBER'])
+          def api(path):
+              return json.loads(subprocess.check_output(['gh','api',path],text=True))
+          pr=api(f'repos/{repo}/pulls/{no}')
+          sha=os.environ['TESTED_SHA']
+          if pr['head']['sha']!=sha or not pr['draft'] or pr['state']!='open' or pr['head']['repo']['full_name']!=repo:
+              sys.exit('PR changed or is not eligible')
+          labels={x['name'] for x in pr.get('labels',[])}
+          if 'stage:fix' not in labels or 'stage:fix-tests' in labels:
+              sys.exit('Conflicting repair routing labels')
+          refs=set(re.findall(r'(?im)\b(?:closes|fixes|resolves)\s+#(\d+)\b',pr.get('body') or ''))
+          if len(refs)!=1: sys.exit('PR must reference one approved Issue')
+          issue=api(f'repos/{repo}/issues/{next(iter(refs))}')
+          if 'stage:implementing' not in {x['name'] for x in issue['labels']}:
+              sys.exit('Linked Issue is not implementing')
+          plans=api(f'repos/{repo}/issues/{issue["number"]}/comments?per_page=100')
+          plans=[c for c in plans if (c.get('user') or {}).get('login')=='github-actions[bot]' and '<!-- automated-planning-v1 -->' in (c.get('body') or '')]
+          if not plans or not re.search(r'(?m)^\s*\*\*READY_FOR_APPROVAL\*\*\s*$',max(plans,key=lambda c:c['id'])['body']):
+              sys.exit('Missing approved plan')
+          comments=api(f'repos/{repo}/issues/{no}/comments?per_page=100')
+          if len(comments)==100: sys.exit('Too many comments: human audit required')
+          reports=[c for c in comments if (c.get('user') or {}).get('login')=='github-actions[bot]' and '<!-- defect-triage-v2\n' in (c.get('body') or '')]
+          if not reports: sys.exit('Missing authenticated per-failure triage report')
+          match=re.search(r'<!-- defect-triage-v2\n(.*?)\n-->',max(reports,key=lambda c:c['id'])['body'],re.S)
+          if not match: sys.exit('Malformed triage report')
+          d=json.loads(match.group(1))
+          if d['sha']!=sha or d['route']!='IMPLEMENTATION_REPAIR':
+              sys.exit('Triage does not authorize an implementation repair for current HEAD')
+          defects=[f for f in d['failures'] if f['classification']=='IMPLEMENTATION_DEFECT' and f['confidence']=='HIGH']
+          if not defects: sys.exit('No confirmed implementation defects')
+          attempts=[c for c in comments if '<!-- controlled-repair-v2 -->' in (c.get('body') or '')]
+          # Budget is a project policy, never a specific task or test name.
+          # Repository policy is fetched as JSON from protected main.
+          content=api(f'repos/{repo}/contents/.github/repair-policy.json?ref=main')
+          import base64
+          policy=json.loads(base64.b64decode(content['content']).decode('utf-8'))
+          if len(attempts)>=policy['max_repair_attempts']:
+              sys.exit('Implementation repair budget reached; human intervention required')
+          if any('**Assessed revision:** `'+sha+'`' in (c.get('body') or '') for c in attempts):
+              sys.exit('Repair already requested for this exact SHA; no duplicate dispatch')
+          plan=max(plans,key=lambda c:c['id'])['body']
+          summary=json.dumps(defects,ensure_ascii=False,indent=2)
+          message=('@copilot\n\n<!-- controlled-repair-v2 -->\n'
+                   '**Assessed revision:** `'+sha+'`\n\n'
+                   'Continue on THIS Pull Request. The independent Defect Triage classified the following '
+                   'specific failures as implementation defects, using the approved Issue and plan.\n\n'
+                   '## Confirmed failures\n```json\n'+summary+'\n```\n\n'
+                   '## Required procedure\n'
+                   '1. Re-check every diagnosis against the linked Issue, approved plan, current test failures and the actual code.\n'
+                   '2. Repair genuine implementation defects only, in the approved implementation scope. Do not change '
+                   'independent tests, expected behavior, or unrelated features. If the diagnosis is wrong, explain and stop.\n'
+                   '3. No changes to repository governance or approved specifications. Ask for human approval for new '
+                   'dependencies or design changes. Preserve the test oracles.\n'
+                   '4. Use the approved project test command/policy in `.github/repair-policy.json`, '
+                   'report actual verification outcomes, and push fixes only to the EXISTING PR branch. Never merge.\n'
+                   '5. After the new commit, the pipeline will retest and reclassify all remaining failures.\n\n'
+                   'Approved implementation file patterns: '+', '.join(policy['implementation_edit_globs'])+'\n'
+                   'Protected paths: '+', '.join(policy['protected_globs'])+'\n'
+                   'Independent test patterns (never modify): '+', '.join(policy['test_file_globs'])+'\n'
+                   f'Controlled implementation repair attempt: {len(attempts)+1} of {policy["max_repair_attempts"]}.\n')
+          if len(message)>28000: sys.exit('Repair instructions too large')
+          Path('implementation-repair-comment.md').write_text(message)
+          print('Authorized',len(defects),'implementation defects on',sha)
           PY
-
-      - name: Ask Copilot to correct the existing PR
+      - name: Request a scoped repair from Copilot on the existing PR
         env:
           GH_TOKEN: ${{ secrets.COPILOT_ASSIGN_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           test -n "$GH_TOKEN" || { echo 'Missing COPILOT_ASSIGN_TOKEN'; exit 1; }
-          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file repair-comment.md
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file implementation-repair-comment.md
