@@ -70,12 +70,23 @@ jobs:
               sys.exit('No bot-published automated plan found')
           latest = max(plans, key=lambda c: c['id'])
           body = latest.get('body') or ''
-          ready = re.search(
-              r'(?m)^\s*\*\*READY_FOR_APPROVAL\*\*\s*$',
-              body,
-          )
-          if not ready:
-              sys.exit('Latest bot-published plan is not READY_FOR_APPROVAL')
+          # Use the same status contract as plan.yml: exactly one heading,
+          # hashes 1-4, optional bold, and an exact valid status token.
+          lines = body.splitlines()
+          headings = [i for i, line in enumerate(lines)
+                      if re.fullmatch(r'\s*#{1,4}\s+Planning status\s*', line, re.I)]
+          if len(headings) != 1:
+              sys.exit('Latest bot plan has a missing or ambiguous Planning status')
+          i = headings[0] + 1
+          while i < len(lines) and not lines[i].strip():
+              i += 1
+          if i >= len(lines):
+              sys.exit('Latest bot plan has no Planning status value')
+          status = lines[i].strip()
+          if status.startswith('**') and status.endswith('**'):
+              status = status[2:-2]
+          if status != 'READY_FOR_APPROVAL':
+              sys.exit(f'Latest bot-published plan is not READY_FOR_APPROVAL (got {status!r})')
           print(f'Authorized by {actor}. Approved bot plan comment: {latest["html_url"]}')
           PY
 
