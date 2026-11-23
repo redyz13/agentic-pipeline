@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "test_command": [
+    "node",
+    "--test",
+    "--test-reporter=junit",
+    "--test-reporter-destination={junit_report}"
+  ],
+  "test_report_glob": "{junit_report}",
+  "test_file_globs": [
+    "tests/*.test.js",
+    "tests/**/*.test.js"
+  ],
+  "protected_globs": [
+    ".github/**",
+    "docs/**",
+    "AGENTS.md"
+  ],
+  "max_repair_attempts": 2,
+  "max_test_files_per_repair": 5,
+  "max_test_delta_lines": 500,
+  "implementation_edit_globs": [
+    "src/**",
+    "index.html"
+  ]
+}
