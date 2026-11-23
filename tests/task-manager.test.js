@@ -52,3 +52,23 @@ test("does not retain a task when persistence fails", () => {
   assert.throws(() => manager.create("Unsaved", "Keep data safe"), /disk full/);
   assert.deepEqual(manager.list(), []);
 });
+
+test("recovers from a storage read failure and allows task creation", () => {
+  const values = new Map();
+  const storage = {
+    getItem() {
+      throw new Error("storage unavailable");
+    },
+    setItem(key, value) {
+      values.set(key, value);
+    }
+  };
+  const manager = new TaskManager(storage);
+
+  assert.deepEqual(manager.list(), []);
+
+  const task = manager.create("Recovered task", "Persist after read failure");
+
+  assert.deepEqual(manager.list(), [task]);
+  assert.deepEqual(JSON.parse(values.get("tasks")), [task]);
+});
