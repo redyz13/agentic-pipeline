@@ -1,8 +1,11 @@
 # Repository governance
-/.github/ @redyz13
+/.github/ @redyz13 @dscap02
 
 # Agent instructions
-/AGENTS.md @redyz13
+/AGENTS.md @redyz13 @dscap02
 
-# Architecture decisions
-/docs/architecture/ @redyz13
+# Approved architecture and design
+/docs/architecture/ @redyz13 @dscap02
+
+# Repository configuration
+/.gitmodules @redyz13 @dscap02
