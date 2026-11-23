@@ -44,7 +44,7 @@ test("does not retain a task when persistence fails", () => {
     getItem() {
       return null;
     },
-    setItem() {
+    saveItem() {
       throw new Error("disk full");
     }
   });
