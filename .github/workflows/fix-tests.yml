@@ -323,13 +323,22 @@ jobs:
           ORIGINAL_SHA: ${{ needs.generate.outputs.head_sha }}
         run: |
           python3 - <<'PY'
-          import json,os,subprocess,sys
+          import json,os,subprocess,sys,time
           from pathlib import Path
           repo,no=os.environ['GITHUB_REPOSITORY'],os.environ['PR_NUMBER']
           sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
-          live=subprocess.check_output(['gh','api',f'repos/{repo}/pulls/{no}','--jq','.head.sha'],text=True).strip()
-          if live!=sha:
-              sys.exit('Repair pushed, but PR changed again before report; human inspection required')
+          # A successful git push can precede the REST pull-request view updating.
+          # Keep the exact-SHA safety gate, but tolerate brief propagation delays.
+          for attempt in range(12):
+              live=subprocess.check_output(
+                  ['gh','api',f'repos/{repo}/pulls/{no}','--jq','.head.sha'],
+                  text=True).strip()
+              if live==sha:
+                  break
+              if attempt<11:
+                  time.sleep(2)
+          else:
+              sys.exit('PR HEAD did not match the published test-repair commit after 12 checks; human inspection required')
           progress=json.loads(Path('repair-progress.json').read_text())
           files=json.loads(Path('changed-tests.json').read_text())['changed']
           auditor=Path('audit-report.txt').read_text(errors='replace')[:5000]
