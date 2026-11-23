@@ -20,6 +20,19 @@ function sortByReverseChronological(tasks) {
   return tasks;
 }
 
+export function searchTasks(tasks, query) {
+  const normalizedQuery = typeof query === "string" ? query.trim().toLowerCase() : "";
+  if (!normalizedQuery) {
+    return [...tasks];
+  }
+
+  return tasks.filter((task) => {
+    const title = typeof task?.title === "string" ? task.title.toLowerCase() : "";
+    const description = typeof task?.description === "string" ? task.description.toLowerCase() : "";
+    return title.includes(normalizedQuery) || description.includes(normalizedQuery);
+  });
+}
+
 function updateNextId(tasks) {
   let maxId = 0;
   for (const task of tasks) {
@@ -118,6 +131,10 @@ export class TaskManager {
 
   getTasks() {
     return this.list();
+  }
+
+  search(query) {
+    return searchTasks(this.tasks, query);
   }
 
   addTask(title, description) {
