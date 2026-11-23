@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Tasks</title>
+  </head>
+  <body>
+    <main>
+      <h1>Tasks</h1>
+      <form id="task-form">
+        <label for="task-title">Title</label>
+        <input id="task-title" name="title" maxlength="120" required>
+
+        <label for="task-description">Description</label>
+        <textarea id="task-description" name="description" maxlength="1000"></textarea>
+
+        <p id="task-error" role="alert"></p>
+        <button type="submit">Create task</button>
+      </form>
+
+      <ul id="task-list" aria-live="polite"></ul>
+    </main>
+    <script type="module" src="./src/app.js"></script>
+  </body>
+</html>
