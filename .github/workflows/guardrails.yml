@@ -1,0 +1,132 @@
+name: Merge guardrails
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, edited]
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+concurrency:
+  group: merge-guardrails-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  merge-policy:
+    name: merge-policy
+    if: github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify protected files and current review evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          PM_USERS: ${{ vars.GOVERNANCE_PM_USERS }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+
+          repo = os.environ['GITHUB_REPOSITORY']
+          pr_number = os.environ['PR_NUMBER']
+          expected_sha = os.environ['EXPECTED_HEAD']
+          allowed_pms = {
+              item.strip().casefold()
+              for item in os.environ.get('PM_USERS', '').split(',')
+              if item.strip()
+          }
+
+          def api(path, paginate=False):
+              command = ['gh', 'api']
+              if paginate:
+                  command += ['--paginate', '--slurp']
+              command.append(path)
+              result = json.loads(subprocess.check_output(command, text=True))
+              return [row for page in result for row in page] if paginate else result
+
+          def reject(message):
+              print('::error::' + message)
+              sys.exit(1)
+
+          pr = api(f'repos/{repo}/pulls/{pr_number}')
+          head_sha = pr['head']['sha']
+          if head_sha != expected_sha:
+              reject('PR changed during validation; retry on the current revision')
+          if pr['base']['ref'] != 'main' or pr['head']['repo']['full_name'] != repo:
+              reject('Only same-repository pull requests targeting main are supported')
+          if pr['draft']:
+              reject('Draft PRs cannot pass the merge policy')
+
+          files = api(f'repos/{repo}/pulls/{pr_number}/files?per_page=100', True)
+          if not files or len(files) >= 300:
+              reject('Empty or oversized change set; request human inspection')
+
+          def protected(path):
+              return (
+                  path == 'AGENTS.md'
+                  or path == '.gitmodules'
+                  or path.startswith('.github/')
+                  or path.startswith('docs/architecture/')
+              )
+
+          protected_paths = []
+          ordinary_paths = []
+          for file in files:
+              paths = [file['filename']]
+              if file.get('previous_filename'):
+                  paths.append(file['previous_filename'])
+              for path in paths:
+                  (protected_paths if protected(path) else ordinary_paths).append(path)
+
+          if protected_paths:
+              # Governance PRs are isolated from application changes.
+              if ordinary_paths:
+                  reject('Governance and application files must be changed in separate PRs: '
+                         + ', '.join(sorted(set(ordinary_paths))[:15]))
+              author = pr['user']['login'].casefold()
+              if author not in allowed_pms:
+                  reject('Governance PR author is not in GOVERNANCE_PM_USERS')
+              reviews = api(f'repos/{repo}/pulls/{pr_number}/reviews?per_page=100', True)
+              latest_per_reviewer = {}
+              for review in reviews:
+                  if review.get('user') and review.get('submitted_at'):
+                      latest_per_reviewer[review['user']['login'].casefold()] = review
+              eligible = [
+                  login for login, review in latest_per_reviewer.items()
+                  if login in allowed_pms
+                  and login != author
+                  and review.get('state') == 'APPROVED'
+                  and review.get('commit_id') == head_sha
+              ]
+              if not eligible:
+                  reject('Governance changes require approval at the current SHA by a different authorized PM')
+              print('Governance PR verified: isolated protected changes and authorized peer approval')
+          else:
+              # For application PRs, the AI review must refer to the exact head commit.
+              comments = api(f'repos/{repo}/issues/{pr_number}/comments?per_page=100', True)
+              reports = [
+                  comment for comment in comments
+                  if (comment.get('user') or {}).get('login') == 'github-actions[bot]'
+                  and '<!-- specialist-review-v1 -->' in (comment.get('body') or '')
+              ]
+              if not reports:
+                  reject('Missing authenticated specialist review')
+              latest = max(reports, key=lambda comment: comment['id'])['body']
+              revision = re.search(r'\*\*Reviewed revision:\*\*\s*`([0-9a-f]{40})`', latest)
+              if not revision or revision.group(1) != head_sha:
+                  reject('Specialist review does not refer to the latest PR commit')
+              if not re.search(r'(?m)^## Specialist AI review\s*[—-]\s*PASS\s*$', latest):
+                  reject('Latest specialist review has not passed')
+              if not re.search(r'(?m)^REVIEW_STATUS:\s*PASS\s*$', latest):
+                  reject('Latest specialist review does not confirm PASS')
+              print('Application PR verified: no protected changes and current specialist PASS')
+          PY
