@@ -137,6 +137,25 @@ jobs:
           if not re.search(r'(?m)^## Independent tester\s+.{0,10}FAIL\b', latest):
               sys.exit('Latest independent tester report does not report FAIL')
 
+          # A failure is not automatically an implementation defect. Require
+          # the separately authenticated triage on the exact current HEAD.
+          triages = [c for c in comments
+                     if '<!-- defect-triage-v1 -->' in (c.get('body') or '')
+                     and (c.get('user') or {}).get('login') == 'github-actions[bot]']
+          if not triages:
+              sys.exit('Missing authenticated Defect Triage classification')
+          triage = max(triages, key=lambda c:c['id'])['body']
+          requirements = (
+              f'**Assessed revision:** `{os.environ["TESTED_SHA"]}`',
+              '**Classification:** IMPLEMENTATION_DEFECT',
+              '**Confidence:** HIGH',
+          )
+          if not all(value in triage for value in requirements):
+              sys.exit('Current triage does not authorize implementation repair')
+          pr_labels = {l['name'] for l in pr.get('labels', [])}
+          if 'stage:fix-tests' in pr_labels:
+              sys.exit('Conflicting test repair label present')
+
           repair_count = sum('<!-- controlled-repair-v1 -->' in (c.get('body') or '')
                              for c in comments)
           if repair_count >= 2:
