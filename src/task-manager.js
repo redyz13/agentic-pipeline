@@ -125,4 +125,21 @@ export class TaskManager {
   }
 }
 
+export function searchTasks(tasks, query) {
+  if (!Array.isArray(tasks)) {
+    return [];
+  }
+  const normalizedQuery = typeof query === "string" ? query.trim().toLowerCase() : "";
+  if (!normalizedQuery) {
+    return [...tasks];
+  }
+  return tasks.filter((task) => {
+    const title = typeof task?.title === "string" ? task.title.toLowerCase() : "";
+    const description = typeof task?.description === "string"
+      ? task.description.toLowerCase()
+      : "";
+    return title.includes(normalizedQuery) || description.includes(normalizedQuery);
+  });
+}
+
 export default TaskManager;

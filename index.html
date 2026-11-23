@@ -3,23 +3,56 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Tasks</title>
+    <title>Task Dashboard</title>
+    <link rel="stylesheet" href="./src/styles.css">
   </head>
   <body>
-    <main>
-      <h1>Tasks</h1>
-      <form id="task-form">
-        <label for="task-title">Title</label>
-        <input id="task-title" name="title" maxlength="120" required>
+    <main class="dashboard">
+      <header class="dashboard-header">
+        <div>
+          <p class="eyebrow">Productivity</p>
+          <h1>Task Dashboard</h1>
+        </div>
+      </header>
 
-        <label for="task-description">Description</label>
-        <textarea id="task-description" name="description" maxlength="1000"></textarea>
+      <section class="creator" aria-labelledby="creator-heading">
+        <div class="section-heading">
+          <h2 id="creator-heading">Create a task</h2>
+        </div>
+        <form id="task-form">
+          <div class="field">
+            <label for="task-title">Title</label>
+            <input id="task-title" name="title" maxlength="120" required aria-describedby="task-error">
+          </div>
+          <div class="field">
+            <label for="task-description">Description <span>(optional)</span></label>
+            <textarea id="task-description" name="description" maxlength="1000" rows="3"></textarea>
+          </div>
+          <div class="form-footer">
+            <p id="task-error" class="feedback" role="alert" aria-live="polite"></p>
+            <button type="submit">Create task</button>
+          </div>
+        </form>
+      </section>
 
-        <p id="task-error" role="alert"></p>
-        <button type="submit">Create task</button>
-      </form>
+      <section class="tasks" aria-labelledby="tasks-heading">
+        <div class="task-toolbar">
+          <div>
+            <p class="eyebrow">Overview</p>
+            <h2 id="tasks-heading">Your tasks</h2>
+          </div>
+          <p id="task-count" class="task-count" aria-live="polite"></p>
+        </div>
 
-      <ul id="task-list" aria-live="polite"></ul>
+        <div class="search-field">
+          <label for="task-search">Search tasks</label>
+          <input id="task-search" name="search" type="search" autocomplete="off"
+            placeholder="Search by title or description">
+        </div>
+
+        <p id="task-empty" class="empty-state" hidden></p>
+        <ul id="task-list" class="task-list" aria-live="polite"></ul>
+      </section>
     </main>
     <script type="module" src="./src/app.js"></script>
   </body>

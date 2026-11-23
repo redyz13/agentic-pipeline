@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createTask, TaskManager } from "../src/task-manager.js";
+import { createTask, searchTasks, TaskManager } from "../src/task-manager.js";
 
 test("creates a task with a title and optional description", () => {
   const task = createTask("  Write tests  ", "  Cover task creation  ");
@@ -51,4 +51,16 @@ test("does not retain a task when persistence fails", () => {
 
   assert.throws(() => manager.create("Unsaved", "Keep data safe"), /disk full/);
   assert.deepEqual(manager.list(), []);
+});
+
+test("searches titles and descriptions case-insensitively", () => {
+  const tasks = [
+    createTask("Fix Navigation", "Update Mobile menu"),
+    createTask("Write Report", "Include quarterly totals")
+  ];
+
+  assert.deepEqual(searchTasks(tasks, "NAVIGATION").map((task) => task.title), ["Fix Navigation"]);
+  assert.deepEqual(searchTasks(tasks, "quarterly").map((task) => task.title), ["Write Report"]);
+  assert.equal(searchTasks(tasks, "   ").length, 2);
+  assert.equal(searchTasks(tasks, "missing").length, 0);
 });
